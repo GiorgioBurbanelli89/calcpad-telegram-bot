@@ -193,26 +193,60 @@ async def mm(text, source, target):
     return " ".join(res)
 
 
+# El bot opera en grupos bilingües ES<->EN. Para textos cortos/ambiguos
+# langdetect se equivoca (p.ej. "Traductor" -> rumano), así que restringimos
+# la detección a es/en con una heurística de respaldo.
+_ES_MARK = set("áéíóúñÁÉÍÓÚÑ¿¡")
+_ES_WORDS = {"de", "la", "el", "que", "y", "en", "un", "una", "los", "las", "del",
+             "por", "para", "con", "se", "es", "no", "como", "más", "pero", "este",
+             "esta", "esto", "si", "al", "lo", "su", "mi", "muy", "ya", "hay", "ser",
+             "fue", "hola", "gracias", "buenos", "días", "qué", "cómo", "cuándo"}
+_EN_WORDS = {"the", "is", "a", "of", "and", "to", "in", "for", "with", "on", "this",
+             "that", "it", "be", "are", "was", "at", "by", "an", "as", "or", "from",
+             "you", "we", "they", "load", "beam", "stress", "hello", "thanks",
+             "please", "how", "what", "when", "good", "morning"}
+
+
+def _decide_lang(t):
+    """Decide es/en para texto corto/ambiguo. Devuelve 'es', 'en' o None."""
+    low = t.lower()
+    toks = re.findall(r"[a-záéíóúñ]+", low)
+    es = sum(1 for w in toks if w in _ES_WORDS) + sum(1 for ch in t if ch in _ES_MARK)
+    en = sum(1 for w in toks if w in _EN_WORDS)
+    if es > en:
+        return "es"
+    if en > es:
+        return "en"
+    return None
+
+
 async def traducir(texto):
     limpio = texto.strip()
-    if len(re.sub(r"[^\wÁÉÍÓÚáéíóúÑñ]", "", limpio, flags=re.UNICODE)) < 2:
+    real = re.sub(r"[^\wÁÉÍÓÚáéíóúÑñ]", "", limpio, flags=re.UNICODE)
+    # No traducir palabras sueltas ni textos muy cortos: la detección de idioma
+    # no es fiable ahí y no aporta ("ok", "jaja", "Traductor", emojis, etc.).
+    if len(limpio.split()) < 2 or len(real) < 8:
         return []
     try:
         origen = detect(limpio)
     except Exception:
-        return []
+        origen = None
+    # Solo ES<->EN. Si detecta otro idioma (ro/ca/it por parecido con el
+    # español) lo reevaluamos por heurística; si sigue sin decidirse, no traduce.
+    if origen not in ("es", "en"):
+        origen = _decide_lang(limpio)
+        if origen is None:
+            return []
+    destino = "en" if origen == "es" else "es"
     prot, rr = _prot(limpio)
-    salidas = []
-    for destino in TARGET_LANGS:
-        if destino == origen:
-            continue
-        try:
-            out = _rest(await mm(prot, origen, destino), rr).strip()
-        except Exception as e:
-            log.warning("trad %s->%s: %s", origen, destino, e); continue
-        if out and out.lower() != limpio.lower():
-            salidas.append((IDIOMAS.get(destino, destino.upper()), out))
-    return salidas
+    try:
+        out = _rest(await mm(prot, origen, destino), rr).strip()
+    except Exception as e:
+        log.warning("trad %s->%s: %s", origen, destino, e)
+        return []
+    if out and out.lower() != limpio.lower():
+        return [(IDIOMAS.get(destino, destino.upper()), out)]
+    return []
 
 
 async def es_admin(bot, chat_id, user_id):
